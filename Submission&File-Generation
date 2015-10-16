@@ -1,0 +1,429 @@
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <time.h>
+#include <pthread.h>
+
+//This program is meant to demonstrate the creation of a user specified number of directories
+//with a file being written in each directory. Ultimately, this program will form the base of
+//the directory and file creation in the NEB program, allowing each image to be contained in
+//its own directory.
+
+void *SubmitJob(void *threadID)
+{
+	long tID;
+	int k;
+	int pass;
+	k = 0;
+	tID = (long)threadID;
+	pass = tID;
+	int c;
+	
+	char ImageArray[pass][50];
+	char WrittingArray[7][100];
+	c = 0;
+	
+	while(c < pass)
+	{
+		sprintf(ImageArray[c], "Image_%d", c + 1);
+		c++;
+	}
+	c = 0;
+	
+	while(c < pass)
+	{
+		k = chdir(ImageArray[c]);
+		if(k != 0)
+		{
+			printf("Directory Change Failed!");
+		}
+		else
+		{
+			system("qsub g09.sh");
+			printf("Job Submitted \n");
+			sleep(1);
+		}
+		c++;
+		k = chdir("../");
+	}
+
+	pthread_exit(NULL);
+}
+
+void *CheckJob(void *threadID)
+{
+	long tID;
+	int k;
+	int pass;
+	k = 0;
+	tID = (long)threadID;
+	pass = tID;
+	int c;
+	int j;
+	j = 0;
+	int g;
+	g = 0;
+	int ch;
+	FILE *fp1 = NULL;
+	FILE *fp2 = NULL;
+	sleep(pass);
+	char CommandArray[pass][50];
+	c = 0;
+	printf("Checking on status of Images: \n");
+	while(c < pass)
+	{
+		sprintf(CommandArray[c], "Image_%d", c + 1);
+		c++;
+	}
+	c = 0;
+	while(j < pass)
+	{
+		sleep(10);
+		k = chdir(CommandArray[c]);
+		system("grep \"Error termination\" Gaussian03_NP2.log > Check");
+		fp2 = fopen("Status", "r");
+		ch = fgetc(fp2);
+		k = 0;
+		if(ch == 'C')
+		{
+			fclose(fp2);
+			fp1 = fopen("Check", "r");
+			ch = fgetc(fp1);
+			do 
+			{
+				ch = fgetc(fp1);
+				if(ch == 'E')
+					k = 1;
+			} while (ch != EOF);
+			fclose(fp1);
+			if(k == 1)
+			{
+				printf("Resubmitting Job for Image %d \n", c+1);
+				system("qsub g09.sh");
+			}
+			else
+			{
+				printf("Image %d has no Errors! \n", c+1);
+				j++;
+			}
+		}
+		sleep(1);
+		c++;
+		if(c == pass)
+		{
+			c = 0;
+		}
+		g++;
+		if(g > 100)
+		{
+			j = pass;
+		}
+		k = chdir("../");
+	}
+
+	pthread_exit(NULL);
+}
+
+int main(int argc, char *argv[])
+{
+	//Here the variables for the program are declared. They all function as either counters
+	//or switches. Several file pointers are declared as well, these are used later one for
+	//keeping track of which files are in use.
+	
+	int i; //'i' is for image, this is the image counter
+	int k;
+	FILE* fp;
+	FILE *fp1 = NULL;
+	FILE *fp2 = NULL;
+	FILE *fp3 = NULL;
+	FILE *fp4 = NULL;
+	int j;
+	int number_of_atoms;
+	float temp; //this is used to transfer the integer value of 'i' to a floating point number
+	int c;
+	c = 1;
+	int q = 0;
+	
+	//Prompt the user for how many images they would like the NEB algorithm to use. This then
+	//creates the desired number of directories.
+	printf("Please enter the number of images you would like use: ");
+	scanf("%d", &i);
+
+	//set temp equal to i. This will become important later on when determining the slope
+	//for the linear interpolation between points.
+	temp = i;
+	
+	//Open the REACTANT file.
+	FILE* myfile = fopen("REACTANT.com", "r");
+	//Another counter, this one used for helping to determine the number of lines in the REACTANT.
+	int ch; 
+	int number_of_lines = 0;
+	int number_of_comments = 0;
+	
+	do 
+	{
+		ch = fgetc(myfile);
+		if(ch == '\n')
+			number_of_lines++;
+		if(ch == '%')
+			number_of_comments++;
+		if(ch == '#')
+			fp3 = myfile;
+	} while (ch != EOF);
+	
+	 //last line doesn't end with a new line!
+	 //but there has to be a line at least before the last line
+	if(ch != '\n' && number_of_lines != 0) 
+		number_of_lines++;
+	
+	fclose(myfile);
+	
+	printf("number of lines in REACTANT.com = %d \n", number_of_lines);
+	
+	FILE* myfile2 = fopen("PRODUCT.com", "r");
+	do 
+	{
+		ch = fgetc(myfile2);
+		if(ch == '#')
+			fp4 = myfile2;
+	} while (ch != EOF);
+	
+	fclose(myfile2);
+	
+	//The number of atoms in the REACTANT file are calculated here.
+	number_of_atoms = number_of_lines - 7 - number_of_comments;
+	
+	//The position arrays for the atoms are declared here since declaring them earlier wouldn't
+	//have taken into account the unknown size of the file.
+	float xyz1[number_of_atoms][3];
+	float xyz2[number_of_atoms][3];
+	float slope[number_of_atoms][3];
+	//The Interpolation Array has to be big enough to store 3 coordinate for each atom in each image.
+	//Hence the calculation and its inevitable large size.
+	float InterpArray[number_of_atoms*i][3];
+	
+	//These are the input strings used to hold all in the information in both the REACTANT and PRODUCT
+	//files as a series of strings.
+	char inputString1[(4*number_of_atoms)+10][100];
+	char inputString2[(4*number_of_atoms)+10][100];
+	
+	//This for loop reads the REACTANT file into the first input string.
+	fp1 = fopen("REACTANT.com", "r");
+	do
+	{
+		ch = fgetc(fp1);
+		if(ch == '#')
+		{
+			fp3 = fp1;
+			for(i = 1; i < ((4*number_of_atoms)+10); i++)
+			{
+				fscanf(fp3, "%s", &inputString1[i]);
+			}	
+		}	
+	}while(ch != EOF);
+	fclose(fp1);
+	ch = 0;
+	fp2 = fopen("PRODUCT.com", "r");
+	do
+	{
+		ch = fgetc(fp2);
+		if(ch == '#')
+		{
+			fp4 = fp2;
+			for(i = 1; i < ((4*number_of_atoms)+10); i++)
+			{
+				fscanf(fp4, "%s", &inputString2[i]);
+			}	
+		}	
+	}while(ch != EOF);
+	fclose(fp2);
+	//Reset counter values
+	k = 0;
+	i=0;
+	//This fills in the xzy arrays with the atomic coordinates from the input strings.
+	while(k < number_of_atoms)
+	{
+		//IMPORTANT!!! The 9 here has its value because that is where the coordinates start on
+		//the input string. If the number of arguments change in the input file, this number
+		//and the numbers below it must change as well. This will be changed in the final
+		//code since it is assumed that the NEB algorithm will only require 'sp' calculations.
+		xyz1[k][0] = atof(inputString1[i+9]);
+		xyz1[k][1] = atof(inputString1[i+10]);
+		xyz1[k][2] = atof(inputString1[i+11]);
+		
+		xyz2[k][0] = atof(inputString2[i+9]);
+		xyz2[k][1] = atof(inputString2[i+10]);
+		xyz2[k][2] = atof(inputString2[i+11]);
+		
+		i+=4;
+		k++;
+	}
+	k = 0;
+	//Calculate the slope for each atom, this is the linear interpolation bit.
+	while(k < number_of_atoms)
+	{
+		slope[k][0] = (xyz2[k][0] - xyz1[k][0])/(temp+1);
+		slope[k][1] = (xyz2[k][1] - xyz1[k][1])/(temp+1);
+		slope[k][2] = (xyz2[k][2] - xyz1[k][2])/(temp+1);
+		k++;
+	}	
+	
+	i = temp;
+	int g;
+	//Calculate the intermediate positions for all of the images and their corresponding atoms.
+	while(q < i*number_of_atoms)
+	{
+		g = 0;
+		while(g < number_of_atoms)
+		{
+			InterpArray[q+g][0] = ((c*slope[g][0]) + xyz1[g][0]);
+			InterpArray[q+g][1] = ((c*slope[g][1]) + xyz1[g][1]);
+			InterpArray[q+g][2] = ((c*slope[g][2]) + xyz1[g][2]);
+			g++;
+		}	
+		c++;
+		q+=number_of_atoms;
+	}	
+	
+	//Create the character array which will be used to store the names of the needed directories.
+	//In the future it might be a good idea to take the floor/log of the number of images to calculate
+	//the necessary length of each row. This would mean that the program could use an unlimited
+	//number of images.
+	char ImageArray[i][50];
+	char WrittingArray[7][100];
+	c = 0;
+	
+	//Here, the directories are named and stored in the array 'ImageArray.'
+	while(c < i)
+	{
+		sprintf(ImageArray[c], "Image_%d", c + 1);
+		c++;
+	}
+
+	//Reset the value of c. This is so it can be used in the next while loop.
+	c = 0;
+	
+	//The directories are created here. 'i' directories are created as specified by the user.
+	//They are produced using the 'mkdir' command which then passes its result value to 'j.'
+	//This value is used to flag if the command executed successfully or not.
+	while(c < i)
+	{
+		//Invocation of mkdir, with appropriate directory name being passed to it.
+		j = mkdir(ImageArray[c], S_IRWXU);
+    
+		//Check if directory creation was successful.
+		if(j != 0) 
+		{
+			printf("Directory Creation Failed For Image: %d", c);
+		}
+		
+		//Add to c, moving to the next directory to be created.
+		c++;
+	}
+
+	//Reset value of c to zero.
+	c = 0;
+	
+	//Reset value of c to zero.
+	c = 0;
+	
+	//This section of code switches between the newly created directories and adds a file to each
+	//one.
+	j = 0;
+	while(c < i)
+	{
+		//Here, the program switches its working directory. This is done in the while loop, switching
+		//to a new directory until the end of the images is reached.
+		k = chdir(ImageArray[c]);
+		//Check that the directory switch occurred.
+		if(k != 0)
+		{
+			printf("Directory Change Failed!");
+		}
+		//Create the test file in the new directory.
+		else
+		{
+			fp = fopen("Gaussian03.com", "w");
+			if(!fp)
+			{
+				printf("File Creation Failed");
+			}
+			
+			//Here we write into the Writing Array and subsequently write the information to the
+			//new file within the image directory.
+			sprintf(WrittingArray[0], "#%s %s %s %s \n", inputString1[1], inputString1[2],
+			inputString1[3], inputString1[4]);
+			sprintf(WrittingArray[1], "\n");
+			sprintf(WrittingArray[2], "%s \n", inputString1[5]);
+			sprintf(WrittingArray[3], "\n");
+			sprintf(WrittingArray[4], "%s %s \n", inputString1[6], inputString1[7]);
+			sprintf(WrittingArray[5], "\n");
+			int h;
+			for(h = 0; h < 5; h++)
+			{
+				fprintf(fp, WrittingArray[h]);
+			}	
+			
+			k = 0;
+			int m;
+			m = 0;
+			//Write all the atomic coordinates to the file.
+			while(k < number_of_atoms)
+			{
+				sprintf(WrittingArray[0], "%s    %f    %f    %f \n", inputString1[8+m], 
+				InterpArray[j+k][0], InterpArray[j+k][1], InterpArray[j+k][2]);
+				fprintf(fp, WrittingArray[0]);
+				k++;
+				m+=4;
+			}
+			sprintf(WrittingArray[0], "\n");
+			fprintf(fp, WrittingArray[0]);
+		}
+		//Change directories to the directory above current directory.
+		k = chdir("../");
+		if(k != 0)
+		{
+			printf("Directory Change Failed");
+		}
+		//Increment c to switch to the next directory.
+		c++;
+		j+=number_of_atoms;
+	}
+	//Reset all counters
+	j = 0;
+	g = 0;
+	c = 0;
+	c = 0;
+	char CommandArray[3+i][100];
+	sprintf(CommandArray[0], "g03 <Gaussian03.com> output.log");
+	while(c < i)
+	{
+		sprintf(CommandArray[c], "cp g09.sh Image_%d", c+1);
+		system(CommandArray[c]);
+		c++;
+	}
+	c = 0;
+	pthread_t threads[i];
+	int rc;
+	long t;
+	t = i;
+	
+	rc = pthread_create(&threads[t], NULL, SubmitJob, (void *)t);
+	if (rc)
+	{
+		printf("ERROR; return code from pthread_create() is %d\n", rc);
+  }
+	
+	c = 0;
+	//rc = pthread_create(&threads[1], NULL, CheckJob, (void *)t);
+	if (rc)
+	{
+		printf("ERROR; return code from pthread_create() is %d\n", rc);
+    }
+	
+	pthread_exit(NULL);
+	return 0;
+}
